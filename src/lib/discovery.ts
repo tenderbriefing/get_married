@@ -1,4 +1,6 @@
-import { prisma } from "./prisma";
+import { adminDb } from "./firebase/admin";
+import { getLatestCompleteAssessment, getUserDoc } from "./firebase/users";
+import type { AssessmentSessionDoc, UserDoc } from "./firebase/types";
 import { compatibilityScore, type Facet } from "./matching";
 import type { TraitVector } from "./assessment-items";
 
@@ -14,88 +16,59 @@ export type DiscoveryCard = {
   facets: Facet[];
 };
 
-function parseTraits(json: string): TraitVector {
-  try {
-    return JSON.parse(json) as TraitVector;
-  } catch {
-    return {};
-  }
-}
-
 function intentCompatible(a: string, b: string) {
   if (a === "either" || b === "either") return true;
   return a === b;
 }
 
 export async function getRankedDiscovery(userId: string): Promise<DiscoveryCard[]> {
-  const me = await prisma.user.findUnique({
-    where: { id: userId },
-    include: {
-      profile: true,
-      assessmentSessions: {
-        where: { status: "complete" },
-        orderBy: { completedAt: "desc" },
-        take: 1,
-      },
-    },
-  });
-  if (!me?.profile?.discoveryReadyAt || !me.assessmentSessions[0]) return [];
+  const me = await getUserDoc(userId);
+  const myAssessment = await getLatestCompleteAssessment(userId);
+  if (!me?.profile?.discoveryReadyAt || !myAssessment) return [];
 
-  const myTraits = parseTraits(me.assessmentSessions[0].traitVectorJson);
-  const myValidity = me.assessmentSessions[0].validityScore;
+  const myTraits = (myAssessment.traitVector || {}) as TraitVector;
+  const myValidity = myAssessment.validityScore ?? 1;
 
-  const swiped = await prisma.swipe.findMany({
-    where: { fromUserId: userId },
-    select: { toUserId: true },
-  });
-  const swipedIds = new Set(swiped.map((s) => s.toUserId));
+  const likesSnap = await adminDb()
+    .collection("likes")
+    .where("fromUserId", "==", userId)
+    .get();
+  const swipedIds = new Set(likesSnap.docs.map((d) => d.data().toUserId as string));
   swipedIds.add(userId);
 
-  const blocked = await prisma.blockReport.findMany({
-    where: {
-      OR: [{ reporterId: userId }, { targetId: userId }],
-    },
-  });
-  for (const b of blocked) {
-    swipedIds.add(b.reporterId === userId ? b.targetId : b.reporterId);
+  const blocksSnap = await adminDb().collection("blocks").get();
+  for (const doc of blocksSnap.docs) {
+    const b = doc.data();
+    if (b.reporterId === userId) swipedIds.add(b.targetId);
+    if (b.targetId === userId) swipedIds.add(b.reporterId);
   }
 
+  const usersSnap = await adminDb().collection("users").where("status", "==", "active").get();
   const year = new Date().getFullYear();
-  const candidates = await prisma.user.findMany({
-    where: {
-      status: "active",
-      id: { notIn: Array.from(swipedIds) },
-      profile: { discoveryReadyAt: { not: null } },
-      assessmentSessions: { some: { status: "complete" } },
-    },
-    include: {
-      profile: true,
-      assessmentSessions: {
-        where: { status: "complete" },
-        orderBy: { completedAt: "desc" },
-        take: 1,
-      },
-    },
-  });
-
   const cards: DiscoveryCard[] = [];
-  for (const c of candidates) {
-    if (!c.profile || !c.assessmentSessions[0]) continue;
-    if (!intentCompatible(me.profile.intent, c.profile.intent)) continue;
-    const theirTraits = parseTraits(c.assessmentSessions[0].traitVectorJson);
+
+  for (const doc of usersSnap.docs) {
+    if (swipedIds.has(doc.id)) continue;
+    const candidate = doc.data() as UserDoc;
+    if (!candidate.profile?.discoveryReadyAt) continue;
+    if (!intentCompatible(me.profile.intent, candidate.profile.intent)) continue;
+
+    const theirAssessment = await getLatestCompleteAssessment(doc.id);
+    if (!theirAssessment) continue;
+
     const { score, band, facets } = compatibilityScore(
       myTraits,
-      theirTraits,
+      (theirAssessment.traitVector || {}) as TraitVector,
       myValidity,
-      c.assessmentSessions[0].validityScore,
+      theirAssessment.validityScore ?? 1,
     );
     cards.push({
-      userId: c.id,
-      displayName: c.profile.displayName,
-      age: year - c.profile.birthYear,
-      bio: c.profile.bio,
-      intent: c.profile.intent,
-      city: c.profile.city,
+      userId: doc.id,
+      displayName: candidate.profile.displayName,
+      age: year - candidate.profile.birthYear,
+      bio: candidate.profile.bio,
+      intent: candidate.profile.intent,
+      city: candidate.profile.city,
       score,
       band,
       facets,
@@ -105,3 +78,5 @@ export async function getRankedDiscovery(userId: string): Promise<DiscoveryCard[
   cards.sort((a, b) => b.score - a.score);
   return cards;
 }
+
+export type { AssessmentSessionDoc };

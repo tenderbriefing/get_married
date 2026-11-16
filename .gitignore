@@ -34,6 +34,11 @@ yarn-error.log*
 .env*
 !.env.example
 
+# Firebase service account keys / local secrets
+/secrets/
+*-admin.json
+service-account*.json
+
 # local database & uploads
 prisma/*.db
 prisma/*.db-journal

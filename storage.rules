@@ -1,0 +1,27 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+    function isImage() {
+      return request.resource != null
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // Post-match photos only — never used for discovery ranking
+    match /match-photos/{userId}/{fileName} {
+      allow read: if signedIn();
+      allow create, update: if isOwner(userId) && isImage();
+      allow delete: if isOwner(userId);
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
