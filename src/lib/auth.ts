@@ -1,72 +1,51 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { createHash, randomBytes } from "crypto";
-import bcrypt from "bcryptjs";
-import { prisma } from "./prisma";
+import { adminAuth } from "./firebase/admin";
+import { toAppUser } from "./firebase/users";
+import type { AppUser } from "./firebase/types";
+
+export type { AppUser };
 
 const SESSION_COOKIE = "resona_session";
 const SESSION_DAYS = 14;
 
-export async function hashPassword(password: string) {
-  return bcrypt.hash(password, 10);
-}
-
-export async function verifyPassword(password: string, hash: string) {
-  return bcrypt.compare(password, hash);
-}
-
-function newToken() {
-  return createHash("sha256").update(randomBytes(32)).digest("hex");
-}
-
-export async function createSession(userId: string) {
-  const token = newToken();
-  const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
-  await prisma.session.create({ data: { token, userId, expiresAt } });
+export async function createSessionFromIdToken(idToken: string) {
+  const expiresIn = SESSION_DAYS * 24 * 60 * 60 * 1000;
+  const sessionCookie = await adminAuth().createSessionCookie(idToken, { expiresIn });
   const jar = await cookies();
-  jar.set(SESSION_COOKIE, token, {
+  jar.set(SESSION_COOKIE, sessionCookie, {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
-    expires: expiresAt,
+    maxAge: SESSION_DAYS * 24 * 60 * 60,
   });
-  return token;
+  return sessionCookie;
 }
 
 export async function destroySession() {
   const jar = await cookies();
   const token = jar.get(SESSION_COOKIE)?.value;
-  if (token) {
-    await prisma.session.deleteMany({ where: { token } });
-    jar.delete(SESSION_COOKIE);
+  jar.delete(SESSION_COOKIE);
+  if (!token) return;
+  try {
+    const decoded = await adminAuth().verifySessionCookie(token);
+    await adminAuth().revokeRefreshTokens(decoded.sub);
+  } catch {
+    // ignore invalid/expired cookies on logout
   }
 }
 
-export async function getCurrentUser() {
+export async function getCurrentUser(): Promise<AppUser | null> {
   const jar = await cookies();
   const token = jar.get(SESSION_COOKIE)?.value;
   if (!token) return null;
-  const session = await prisma.session.findUnique({
-    where: { token },
-    include: {
-      user: {
-        include: {
-          profile: true,
-          assessmentSessions: {
-            where: { status: "complete" },
-            orderBy: { completedAt: "desc" },
-            take: 1,
-          },
-        },
-      },
-    },
-  });
-  if (!session || session.expiresAt < new Date()) {
-    if (session) await prisma.session.delete({ where: { id: session.id } });
+  try {
+    const decoded = await adminAuth().verifySessionCookie(token, true);
+    return toAppUser(decoded.uid);
+  } catch {
     return null;
   }
-  return session.user;
 }
 
 export async function requireUser() {
@@ -74,8 +53,6 @@ export async function requireUser() {
   if (!user) redirect("/login");
   return user;
 }
-
-export type AppUser = NonNullable<Awaited<ReturnType<typeof getCurrentUser>>>;
 
 export function onboardingPath(user: AppUser): string | null {
   if (!user.consentAt) return "/onboarding";

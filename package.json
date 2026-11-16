@@ -10,6 +10,8 @@
     "db:push": "prisma db push",
     "db:seed": "tsx prisma/seed.ts",
     "db:reset": "rm -f prisma/dev.db prisma/dev.db-journal && prisma db push && tsx prisma/seed.ts",
+    "firebase:seed": "tsx scripts/seed-firebase.ts",
+    "firebase:deploy-rules": "npx -y firebase-tools@latest deploy --only firestore:rules,storage --project resona123",
     "postinstall": "prisma generate"
   },
   "prisma": {
@@ -19,6 +21,8 @@
     "@prisma/client": "^6.19.3",
     "bcryptjs": "^3.0.3",
     "dotenv": "^18.0.10",
+    "firebase": "^13.3.0",
+    "firebase-admin": "^14.5.1",
     "next": "15.5.29",
     "react": "19.1.0",
     "react-dom": "19.1.0",

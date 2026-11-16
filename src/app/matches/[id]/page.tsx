@@ -3,7 +3,9 @@ import { AppNav } from "@/components/AppNav";
 import { ChatClient } from "@/components/ChatClient";
 import { onboardingPath, requireUser } from "@/lib/auth";
 import { icebreakers, type Facet } from "@/lib/matching";
-import { prisma } from "@/lib/prisma";
+import { adminDb } from "@/lib/firebase/admin";
+import { getUserDoc } from "@/lib/firebase/users";
+import type { MatchDoc, MessageDoc } from "@/lib/firebase/types";
 
 export default async function MatchChatPage({
   params,
@@ -15,24 +17,22 @@ export default async function MatchChatPage({
   const gate = onboardingPath(user);
   if (gate) redirect(gate);
 
-  const match = await prisma.match.findUnique({
-    where: { id },
-    include: {
-      userA: { include: { profile: true } },
-      userB: { include: { profile: true } },
-      conversation: {
-        include: { messages: { orderBy: { createdAt: "asc" } } },
-      },
-    },
-  });
+  const matchSnap = await adminDb().collection("matches").doc(id).get();
+  if (!matchSnap.exists) notFound();
+  const match = { id: matchSnap.id, ...(matchSnap.data() as MatchDoc) };
+  if (match.userAId !== user.id && match.userBId !== user.id) notFound();
 
-  if (!match || (match.userAId !== user.id && match.userBId !== user.id)) {
-    notFound();
-  }
+  const otherId = match.userAId === user.id ? match.userBId : match.userAId;
+  const other = await getUserDoc(otherId);
+  const facets = (match.facets || []) as Facet[];
+  const prompts = icebreakers(facets, other?.profile?.displayName || "there");
 
-  const other = match.userAId === user.id ? match.userB : match.userA;
-  const facets = JSON.parse(match.facetsJson || "[]") as Facet[];
-  const prompts = icebreakers(facets, other.profile?.displayName || "there");
+  const messagesSnap = await adminDb()
+    .collection("matches")
+    .doc(id)
+    .collection("messages")
+    .orderBy("createdAt", "asc")
+    .get();
 
   return (
     <main>
@@ -41,17 +41,20 @@ export default async function MatchChatPage({
         <ChatClient
           matchId={match.id}
           meId={user.id}
-          otherName={other.profile?.displayName || "Match"}
+          otherName={other?.profile?.displayName || "Match"}
           myPhotoUrl={user.profile?.photoUrl}
-          theirPhotoUrl={other.profile?.photoUrl}
+          theirPhotoUrl={other?.profile?.photoUrl}
           facets={facets.map((f) => f.label)}
           icebreakers={prompts}
-          initialMessages={(match.conversation?.messages || []).map((m) => ({
-            id: m.id,
-            body: m.body,
-            senderId: m.senderId,
-            createdAt: m.createdAt.toISOString(),
-          }))}
+          initialMessages={messagesSnap.docs.map((d) => {
+            const m = d.data() as MessageDoc;
+            return {
+              id: d.id,
+              body: m.body,
+              senderId: m.senderId,
+              createdAt: m.createdAt,
+            };
+          })}
         />
       </div>
     </main>
